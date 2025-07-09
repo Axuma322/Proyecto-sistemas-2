@@ -1,0 +1,178 @@
+#include <TaskScheduler.h>  // Librería para manejo eficiente de tareas periódicas
+
+// Pines de conexión (modifica si cambias la conexión física)
+const int PIN_POT     = A0;  // Entrada analógica: potenciómetro para referencia
+const int PIN_PLANTA  = A2;  // Entrada analógica: salida de la planta
+const int PIN_PWM     = 9;   // Salida PWM para control de la planta
+const int PIN_ONDA    = 7;   // Salida digital para generar onda cuadrada como referencia
+const int PIN_BOTON   = 2;   // Entrada digital para el botón que alterna modo potenciómetro/onda
+
+// Parámetros del controlador PI
+const float Kp = 0.8111;     // Ganancia proporcional
+const float Ki = 2.3;        // Ganancia integral
+const float Ts = 0.05;       // Periodo de muestreo en segundos (50 ms)
+
+// Variables para cálculo del control
+float integrador = 0.0;      // Acumulador para la parte integral del controlador
+
+// Variables globales para referencia, salida, error y señal de control PWM
+float referencia   = 0.0;    // Valor de referencia actual (0-255)
+float salidaPlanta = 0.0;    // Valor de la salida leída de la planta (0-255)
+float errorCtl     = 0.0;    // Error calculado (referencia - salida)
+float controlPWM   = 0.0;    // Señal de control a enviar (0-255)
+
+// Variables para manejar el modo de referencia y evitar reimpresiones
+bool usarOnda = false;       // Indica si usamos onda cuadrada (true) o potenciómetro (false)
+bool lastModo = false;       // Guarda el modo anterior para detectar cambio
+
+// Parámetros de la onda cuadrada (periodo total 6 segundos)
+const unsigned long ONDA_T = 6000;  // Periodo onda cuadrada en milisegundos
+unsigned long prevTimeOnda = 0;      // Marca de tiempo para cambio de estado de la onda
+bool stateOnda = LOW;                // Estado actual de la onda (ALTO o BAJO)
+
+// Declaración de funciones de tareas
+void tareaActualizarReferencia();
+void tareaLeerPlanta();
+void tareaControlPI();
+
+// Instancia del scheduler y tareas con periodos de 50 ms
+Scheduler runner;
+Task taskRef(50, TASK_FOREVER, tareaActualizarReferencia);
+Task taskPlant(50, TASK_FOREVER, tareaLeerPlanta);
+Task taskControl(50, TASK_FOREVER, tareaControlPI);
+
+void setup() {
+  Serial.begin(9600);                  // Inicializa comunicación serial a 9600 bps
+
+  pinMode(PIN_BOTON, INPUT_PULLUP);   // Botón con resistencia pull-up interna
+  pinMode(PIN_PWM, OUTPUT);            // Pin PWM como salida
+  pinMode(PIN_ONDA, OUTPUT);           // Pin onda cuadrada como salida
+  digitalWrite(PIN_ONDA, LOW);         // Estado inicial LOW para la onda cuadrada
+
+  // Agrega las tareas al scheduler
+  runner.addTask(taskRef);
+  runner.addTask(taskPlant);
+  runner.addTask(taskControl);
+
+  // Habilita las tareas para que empiecen a ejecutarse
+  taskRef.enable();
+  taskPlant.enable();
+  taskControl.enable();
+}
+
+void loop() {
+  runner.execute();  // Ejecuta las tareas programadas periódicamente
+
+  // Lee el estado del botón (activo en LOW porque está con pull-up)
+  int lectura = digitalRead(PIN_BOTON);
+  usarOnda = (lectura == LOW);  // Si el botón está presionado, usa onda cuadrada
+
+  // Detecta si hubo cambio de modo y lo imprime solo una vez
+  if (usarOnda != lastModo) {
+    Serial.print("Modo cambiado: ");
+    Serial.println(usarOnda ? "Onda cuadrada" : "Potenciómetro");
+
+    // Si cambiamos a modo potenciómetro, aseguramos que onda esté en LOW
+    if (!usarOnda) digitalWrite(PIN_ONDA, LOW);
+
+    lastModo = usarOnda;  // Actualiza el modo anterior
+  }
+}
+
+// ————————————————————————————————————————————————————————————
+// Actualiza el valor de referencia según el modo activo
+//————————————————————————————————————————————————————————————
+void tareaActualizarReferencia() {
+  if (!usarOnda) {
+    // Modo potenciómetro: lee el valor analógico del potenciómetro
+    int lecturaPot = analogRead(PIN_POT);
+
+    // Convierte a voltaje real (0-5V)
+    float voltRef = (lecturaPot * 5.0) / 1023.0;
+
+    // Restringe voltaje entre 1 V y 3.5 V según especificaciones
+    voltRef = constrain(voltRef, 1.0, 3.5);
+
+    // Mapea ese voltaje a rango PWM (0-255) para referencia
+    referencia = map(voltRef * 1000, 1000, 3500, 0, 255);
+
+    // Debug: imprime valores para monitoreo
+    Serial.print("Pot ADC: "); Serial.print(lecturaPot);
+    Serial.print(" Volt Ref: "); Serial.print(voltRef, 3);
+    Serial.print(" Ref mapeada: "); Serial.println(referencia);
+  } else {
+    // Modo onda cuadrada: genera onda con periodo ONDA_T
+    unsigned long now = millis();
+    if (now - prevTimeOnda >= ONDA_T / 2) {
+      stateOnda = !stateOnda;
+      prevTimeOnda = now;
+      digitalWrite(PIN_ONDA, stateOnda);
+    }
+    // Asigna referencia a 255 o 0 según estado de la onda
+    referencia = stateOnda ? 255.0 : 0.0;
+  }
+}
+
+// ————————————————————————————————————————————————————————————
+// Lee la salida analógica de la planta
+//————————————————————————————————————————————————————————————
+void tareaLeerPlanta() {
+  int lecturaADC = analogRead(PIN_PLANTA);
+
+  // Convierte lectura ADC a voltaje
+  float voltSalida = (lecturaADC * 5.0) / 1023.0;
+
+  // Restringe voltaje para evitar valores fuera de rango
+  voltSalida = constrain(voltSalida, 1.0, 3.5);
+
+  // Mapea voltaje a rango PWM para procesar salida
+  salidaPlanta = map(voltSalida * 1000, 1000, 3500, 0, 255);
+
+  // Debug: imprime valores para monitoreo
+  Serial.print("Planta ADC: "); Serial.print(lecturaADC);
+  Serial.print(" Volt Salida: "); Serial.print(voltSalida, 3);
+  Serial.print(" Salida mapeada: "); Serial.println(salidaPlanta);
+}
+
+// ————————————————————————————————————————————————————————————
+// Calcula la señal PWM usando controlador proporcional-integral (PI)
+//————————————————————————————————————————————————————————————
+void tareaControlPI() {
+  unsigned long tiempo_actual = millis(); // Obtiene tiempo actual en ms
+  // Calcula error entre referencia y salida
+  errorCtl = referencia - salidaPlanta;
+
+  // Actualiza acumulador integral
+  integrador += errorCtl * Ts;
+
+  // Limita el integrador para evitar saturación (anti-windup)
+  integrador = constrain(integrador, -100.0, 100.0);
+
+  // Calcula señal de control
+  controlPWM = Kp * errorCtl + Ki * integrador;
+
+  // Limita señal PWM a rango válido (0-255)
+  controlPWM = constrain(controlPWM, 0.0, 255.0);
+
+  // Envía señal PWM al pin de control
+  analogWrite(PIN_PWM, int(controlPWM));
+
+  // Debug: imprime valores para monitoreo
+  Serial.print("Ref:"); Serial.print(referencia);
+  Serial.print("  Out:"); Serial.print(salidaPlanta);
+  Serial.print("  Ctrl:"); Serial.println(controlPWM);
+
+  // Impresión para exportar datos con tiempo y valores separados por tab
+  Serial.print(tiempo_actual);     
+  Serial.print('\t');              
+  Serial.print(referencia);
+  Serial.print('\t');
+  Serial.print(salidaPlanta);
+  Serial.print('\t');
+  Serial.println(controlPWM);
+
+  // Impresión adicional para lectura cruda del potenciómetro
+  int lecturaPot = analogRead(PIN_POT);
+  Serial.print("Lectura cruda potenciómetro: ");
+  Serial.println(lecturaPot);
+}
