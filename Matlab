@@ -1,0 +1,50 @@
+function resultados = analizarRespuestas(nombreArchivo)
+    % Carga datos: columnas = [tiempo, referencia, salida, control]
+    data = readmatrix(nombreArchivo);
+    tiempo = data(:,1);
+    ref = data(:,2);
+    out = data(:,3);
+
+    % Valor final de referencia (asumimos que es constante al final)
+    valor_final = ref(end);
+
+    % Tolerancia para tiempo de asentamiento (2%)
+    tolerancia = 0.02 * valor_final;
+
+    % 1. Tiempo de asentamiento
+    idx_asentamiento = find(abs(out - valor_final) <= tolerancia, 1, 'first');
+    if isempty(idx_asentamiento)
+        tiempo_asentamiento = NaN; % No se estabilizó en datos
+    else
+        tiempo_asentamiento = tiempo(idx_asentamiento);
+    end
+
+    % 2. Sobrepaso máximo en %
+    max_pico = max(out);
+    Mp = (max_pico - valor_final) / valor_final * 100;
+
+    % 3. Error estacionario
+    ess = abs(valor_final - out(end));
+
+    % 4. Tiempo de subida (del 10% al 90%)
+    t10 = find(out >= 0.1*valor_final, 1, 'first');
+    t90 = find(out >= 0.9*valor_final, 1, 'first');
+    if isempty(t10) || isempty(t90)
+        tiempo_subida = NaN;
+    else
+        tiempo_subida = tiempo(t90) - tiempo(t10);
+    end
+
+    % Guardar resultados en struct
+    resultados = struct('TiempoAsentamiento', tiempo_asentamiento, ...
+                        'SobrepasoMaximo', Mp, ...
+                        'ErrorEstacionario', ess, ...
+                        'TiempoSubida', tiempo_subida);
+
+    % Mostrar resultados
+    fprintf('Archivo: %s\n', nombreArchivo);
+    fprintf('Tiempo de asentamiento: %.2f ms\n', tiempo_asentamiento);
+    fprintf('Sobrepaso máximo: %.2f %%\n', Mp);
+    fprintf('Error estacionario: %.2f\n', ess);
+    fprintf('Tiempo de subida: %.2f ms\n\n', tiempo_subida);
+end
